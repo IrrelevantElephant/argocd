@@ -1,0 +1,136 @@
+name: "Pipeline"
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - "README.md"
+      - "docs/**"
+
+jobs:
+  terraform:
+    name: "Terraform"
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./infrastructure/terraform
+
+    outputs:
+      k8s_cluster_id: ${{ steps.apply_terraform.outputs.k8s_cluster_id }}
+      container_registry: ${{ steps.apply_terraform.outputs.container_registry }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.6.6"
+
+      - name: "Apply Terraform"
+        id: apply_terraform
+        uses: ./.github/workflows/terraform
+        with:
+          scw-access-key: ${{ secrets.SCW_ACCESS_KEY }}
+          scw-secret-key: ${{ secrets.SCW_SECRET_KEY }}
+          aws-access-key-id: ${{ secrets.SCW_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.SCW_SECRET_KEY }}
+
+  apply-helmfile:
+    needs: terraform
+    runs-on: ubuntu-latest
+
+    env:
+      SCW_ACCESS_KEY: ${{ secrets.SCW_ACCESS_KEY }}
+      SCW_SECRET_KEY: ${{ secrets.SCW_SECRET_KEY }}
+      k8s_cluster_id: ${{ needs.terraform.outputs.k8s_cluster_id }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure SCW CLI
+        uses: scaleway/action-scw@v0
+        with:
+          save-config: true
+          export-config: true
+          default-project-id: ${{ secrets.SCW_DEFAULT_PROJECT_ID }}
+          default-organization-id: ${{ secrets.SCW_DEFAULT_ORGANIZATION_ID }}
+
+      - name: Configure Kubernetes
+        run: |
+          mkdir ~/.kube
+          scw k8s kubeconfig get $k8s_cluster_id > ~/.kube/config
+
+      - name: Helmfile
+        uses: helmfile/helmfile-action@main
+        with:
+          helmfile-args: apply
+          helmfile-workdirectory: ./infrastructure/helmfile
+
+  docker:
+    needs: terraform
+    runs-on: ubuntu-latest
+
+    outputs:
+      docker_tag_sha: ${{ steps.set_docker_tags.outputs.docker_tag_sha }}
+      docker_tag_latest: ${{ steps.set_docker_tags.outputs.docker_tag_latest }}
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Login to Scaleway Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ needs.terraform.outputs.container_registry }}
+          username: nologin
+          password: ${{ secrets.SCW_SECRET_KEY }}
+      - name: Set tags
+        id: set_docker_tags
+        env:
+          container_registry: ${{ needs.terraform.outputs.container_registry }}
+        run: |
+          echo "docker_tag_sha=$container_registry/app:$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "docker_tag_latest=$container_registry/app:latest" >> $GITHUB_OUTPUT
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          push: true
+          tags: ${{ steps.set_docker_tags.outputs.docker_tag_latest }}, ${{ steps.set_docker_tags.outputs.docker_tag_sha }}
+          file: ./src/app/Dockerfile
+          context: ./src/app
+
+  kubectl-apply:
+    name: deploy to cluster
+    runs-on: ubuntu-latest
+    container: alpine/k8s:1.25.16
+    needs:
+      - terraform
+      - docker
+    env:
+      SCW_ACCESS_KEY: ${{ secrets.SCW_ACCESS_KEY }}
+      SCW_SECRET_KEY: ${{ secrets.SCW_SECRET_KEY }}
+      k8s_cluster_id: ${{ needs.terraform.outputs.k8s_cluster_id }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure SCW CLI
+        uses: scaleway/action-scw@v0
+        with:
+          save-config: true
+          export-config: true
+          default-project-id: ${{ secrets.SCW_DEFAULT_PROJECT_ID }}
+          default-organization-id: ${{ secrets.SCW_DEFAULT_ORGANIZATION_ID }}
+      - name: Configure Kubernetes
+        run: |
+          mkdir ~/.kube
+          scw k8s kubeconfig get $k8s_cluster_id > ~/.kube/config
+      - name: Apply
+        env:
+          docker_tag_sha: ${{ needs.docker.outputs.docker_tag_sha }}
+        run: |
+          cd ./src/app/kubernetes/
+          sed -i "s|image: .*|image: $docker_tag_sha|" deployment.yaml
+          kubectl apply -f .

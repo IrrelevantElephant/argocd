@@ -1,0 +1,61 @@
+name: "Terraform"
+description: "Deploy Terraform"
+defaults:
+  run:
+    working-directory: ./infrastructure/terraform
+inputs:
+  scw-access-key:
+    description: "Scaleway access key"
+    required: true
+  scw-secret-key:
+    description: "Scaleway secret key"
+    required: true
+  aws-access-key-id:
+    description: "AWS access key to interact with state bucket"
+    required: true
+  aws-secret-access-key:
+    description: "AWS secret access key to interact with state bucket"
+    required: true
+outputs:
+  k8s_cluster_id:
+    value: ${{ steps.capture_output.outputs.k8s_cluster_id }}
+  container_registry:
+    value: ${{ steps.capture_output.outputs.container_registry }}
+runs:
+  using: "composite"
+  steps:
+    - name: Set Environment Variables
+      shell: bash
+      run: |
+        echo "SCW_ACCESS_KEY=${{ inputs.scw-access-key }}" >> $GITHUB_ENV
+        echo "SCW_SECRET_KEY=${{ inputs.scw-secret-key }}" >> $GITHUB_ENV
+        echo "AWS_ACCESS_KEY_ID=${{ inputs.aws-access-key-id }}" >> $GITHUB_ENV
+        echo "AWS_SECRET_ACCESS_KEY=${{ inputs.aws-secret-access-key }}" >> $GITHUB_ENV
+
+    - name: Terraform Init
+      working-directory: ./infrastructure/terraform
+      run: terraform init
+      shell: bash
+
+    - name: Terraform Format, Validate and Plan
+      working-directory: ./infrastructure/terraform
+      run: |
+        terraform fmt -check
+        terraform validate
+        terraform plan
+      shell: bash
+
+    - name: Terraform Apply
+      working-directory: ./infrastructure/terraform
+      if: github.ref == 'refs/heads/main'
+      run: terraform apply -auto-approve
+      shell: bash
+
+    - name: Set variables
+      working-directory: ./infrastructure/terraform
+      id: capture_output
+      # Scaleway k8s cluster id's are in the format `fr-par/11111111-1111-1111-1111-111111111111` so we need to extract the id
+      run: |
+        echo "k8s_cluster_id=$(terraform output -raw k8s_cluster_id | cut -d'/' -f2)" >> $GITHUB_OUTPUT
+        echo "container_registry=$(terraform output -raw container_registry)" >> $GITHUB_OUTPUT
+      shell: bash
