@@ -2,7 +2,7 @@ name: "Terraform"
 description: "Deploy Terraform"
 defaults:
   run:
-    working-directory: ./infrastructure/terraform
+    working-directory: ./terraform
 inputs:
   scw-access-key:
     description: "Scaleway access key"
@@ -33,12 +33,12 @@ runs:
         echo "AWS_SECRET_ACCESS_KEY=${{ inputs.aws-secret-access-key }}" >> $GITHUB_ENV
 
     - name: Terraform Init
-      working-directory: ./infrastructure/terraform
+      working-directory: ./terraform
       run: terraform init
       shell: bash
 
     - name: Terraform Format, Validate and Plan
-      working-directory: ./infrastructure/terraform
+      working-directory: ./terraform
       run: |
         terraform fmt -check
         terraform validate
@@ -46,13 +46,13 @@ runs:
       shell: bash
 
     - name: Terraform Apply
-      working-directory: ./infrastructure/terraform
+      working-directory: ./terraform
       if: github.ref == 'refs/heads/main'
       run: terraform apply -auto-approve
       shell: bash
 
     - name: Set variables
-      working-directory: ./infrastructure/terraform
+      working-directory: ./terraform
       id: capture_output
       # Scaleway k8s cluster id's are in the format `fr-par/11111111-1111-1111-1111-111111111111` so we need to extract the id
       run: |
